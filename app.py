@@ -1,14 +1,16 @@
-# app.py
+# test_app.py
 
-from flask import Flask 
+import pytest
+from app import app
 
-app = Flask(__name__)
+@pytest.fixture
+def client():
+    app.config['TESTING'] = True
+    with app.test_client() as client:
+        yield client
 
-@app.route("/")
-def index_page():
-
-    # message = 'Добро пожаловать! Проверка окончания лабы 1'
-    return "Hello from Flask CD!" # <-- Новая строка: возвращаем простой текст
-
-    # return render_template('index.html', message=message)
-
+def test_index_page(client):
+    res = client.get("/")
+    assert res.status_code == 200
+    # assert 'Добро пожаловать' in res.text 
+    assert 'Hello from Flask CD!' in res.text 
