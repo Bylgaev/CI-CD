@@ -1,47 +1,115 @@
 # .github/workflows/cicd.yaml
 
-on: [push]
+on:
+  push: # Workflow будет запускаться при каждом push в репозиторий
+    branches: [ main, master ] # <-- Укажите ветки, при push в которые должен запускаться workflow (например, main, master, develop)
+
 jobs:
+  # --- Этап Continuous Integration (CI) ---
+
   testing:
-    runs-on: ubuntu-latest
+    name: Run Tests
+    runs-on: ubuntu-latest # Виртуальная машина для выполнения job
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code # Шаг: Клонирование кода из репозитория
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python # Шаг: Настройка окружения Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: '3.13' # <-- Укажите нужную версию Python, если отличается
 
-      - run: pip install flask pytest
+      - name: Install dependencies # Шаг: Установка зависимостей (Flask, Pytest и т.п.)
+        run: pip install flask pytest # <-- Установите все зависимости вашего приложения
 
-      - run: pytest
+      - name: Run tests # Шаг: Запуск тестов (Pytest)
+        run: pytest
 
   build:
+    name: Build and Push Docker Image
     runs-on: ubuntu-latest
+    needs: testing # <-- Эта job зависит от job 'testing'. Она выполнится только если 'testing' пройдет успешно.
 
     permissions:
-      contents: read
-      packages: write
+      contents: read # Разрешение на чтение содержимого репозитория (для checkout)
+      packages: write # Разрешение на запись пакетов (для публикации в GHCR)
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+      - name: Login to GitHub Container Registry # Шаг: Вход в GHCR
+        uses: docker/login-action@v3 # Используем action для аутентификации
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ github.actor }} # Имя пользователя/организации GitHub
+          password: ${{ secrets.GITHUB_TOKEN }} # Встроенный токен GitHub (имеет права на push в GHCR при наличии permissions.packages: write)
 
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@v5
+      - name: Extract metadata (tags, labels) for Docker # Шаг: Генерация тегов и меток для образа
+        id: meta # Присваиваем ID для доступа к output
+        uses: docker/metadata-action@v5 # Используем action для генерации метаданных
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ghcr.io/${{ github.repository }} # Указываем базовое имя образа (ghcr.io/владелец/репозиторий)
+          # Исправленная настройка тегов: используем type=raw для литералов и type=sha
+          tags: |
+            type=raw,value=latest # <-- Генерирует тег 'latest'. Осторожно с этим тегом, он всегда указывает на последний push.
+            type=sha,prefix=    # <-- Генерирует тег из SHA коммита (без префикса 'sha-'). Этот тег уникален для каждого коммита.
+            # Если вы хотите тег, основанный на имени ветки (как у вас было с ':main'), используйте:
+            # type=ref,event=branch,enable=${{ github.ref_name != 'main' && github.ref_name != 'master' }} # Тег из имени ветки, кроме main/master
+            # type=raw,value={{branch}},enable={{is_default}} # Тег из имени ветки, только для дефолтной (main/master)
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+      - name: Build and push Docker image # Шаг: Сборка и публикация образа
+        uses: docker/build-push-action@v5 # Используем action для сборки и push
         with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          context: . # <-- Путь к Dockerfile ('.' означает корень репозитория. Измените, если Dockerfile в другом месте, например 'app/')
+          push: true # Включаем публикацию образа
+          tags: ${{ steps.meta.outputs.tags }} # Используем сгенерированные теги
+          labels: ${{ steps.meta.outputs.labels }} # Используем сгенерированные метки
+          cache-from: type=gha # Включение кеширования сборки для ускорения
+          cache-to: type=gha,mode=max # Настройка кеширования сборки
+
+  # --- Этап Continuous Deployment (CD) ---
+
+  deploy:
+    name: Deploy to EC2
+    # Эта job запускается только на push в главную ветку (например, main или master)
+    # Убедитесь, что ветка в триггере 'on:' совпадает с этой проверкой,
+    # или удалите условие 'if:', если деплоить нужно при push в любую ветку после сборки.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    needs: [testing, build] # <-- Эта job зависит от job 'testing' И 'build'. Она выполнится только если ОБЕ предыдущие пройдут успешно.
+
+    steps:
+      - name: Deploy via SSH # Шаг: Подключение к серверу EC2 по SSH и выполнение команд развертывания
+        # Используем популярный сторонний action для SSH-соединений
+        uses: appleboy/ssh-action@v1.0.0 # Убедитесь, что используете актуальную версию action
+
+        with:
+          host: ${{ secrets.SSH_HOST }} # <-- Секрет GitHub: Публичный IP или DNS вашего EC2 инстанса
+          username: ubuntu # <-- Имя пользователя на EC2 (для Ubuntu AMI по умолчанию 'ubuntu')
+          key: ${{ secrets.SSH_PRIVATE_KEY }} # <-- Секрет GitHub: Содержимое вашего приватного ключа SSH (.pem файла)
+          script: | # <-- Команды, которые будут выполнены на сервере EC2
+            echo "Connecting to EC2 instance..."
+            # Переходим в каталог с docker-compose.yaml на сервере
+            cd /home/ubuntu/test_cicd
+            echo "Changed directory to $(pwd)"
+
+            # Обновляем образ контейнера (загружаем последнюю версию)
+            # В docker-compose.yaml у вас должен быть указан тег, который был опубликован CI (например ':main' или ':latest')
+            # Если вы в docker-compose.yaml используете ':latest' или ':main', pull скачает последнюю версию с этим тегом.
+            echo "Pulling latest Docker image from registry..."
+            docker compose pull web # <-- Указываем имя сервиса, для которого тянем образ
+
+            # Перезапускаем приложение: останавливаем старый контейнер и запускаем новый с обновленным образом
+            # --force-recreate гарантирует создание нового контейнера, даже если тег образа не изменился (например, ':latest' или ':main')
+            # -d запускает в фоновом режиме
+            # --no-deps полезно, если у вас несколько сервисов, но вы обновляете только один
+            echo "Restarting Docker Compose services..."
+            docker compose up -d --force-recreate --no-deps web # <-- Указываем имя сервиса для запуска
+
+            echo "Deployment script finished."
+
+            # Опционально: очистка старых неиспользуемых образов для экономии места на сервере
+            # echo "Pruning old docker images..."
+            # docker image prune -f
